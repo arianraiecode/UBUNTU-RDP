@@ -4,14 +4,20 @@ name: Ubuntu-RDP
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   secure-rdp:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-      - name: Install XFCE Desktop and XRDP
+      - name: Install XFCE and XRDP
+        shell: bash
         run: |
+          set -euo pipefail
+
           sudo apt-get update
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -20,42 +26,64 @@ jobs:
             xrdp \
             xorgxrdp \
             dbus-x11 \
+            openssl \
+            curl \
             netcat-openbsd
 
-          # Configure XFCE for RDP sessions
-          sudo useradd -m -s /bin/bash RDP
+          # Create RDP user
+          if ! id RDP >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash RDP
+          fi
 
-          echo "xfce4-session" | sudo tee /home/RDP/.xsession
+          # Configure XFCE session
+          echo "xfce4-session" | sudo tee /home/RDP/.xsession >/dev/null
           sudo chown RDP:RDP /home/RDP/.xsession
           sudo chmod 644 /home/RDP/.xsession
 
-          # Allow XRDP to access its TLS certificate
+          # Configure XRDP
+          sudo usermod -aG ssl-cert xrdp
           sudo usermod -aG ssl-cert RDP
 
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
-      - name: Set RDP Password
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      - name: Generate Secure RDP Password
+        id: credentials
+        shell: bash
         run: |
-          if [ -z "$RDP_PASSWORD" ]; then
-            echo "RDP_PASSWORD secret is missing"
-            exit 1
-          fi
+          set -euo pipefail
 
-          echo "RDP:$RDP_PASSWORD" | sudo chpasswd
+          PASSWORD=$(openssl rand -base64 32 | tr -d '\n')
+
+          echo "RDP_PASSWORD=$PASSWORD" | sudo chpasswd
+
+          echo "::add-mask::$PASSWORD"
+
+          echo "password=$PASSWORD" >> "$GITHUB_OUTPUT"
+
+          echo "RDP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
 
       - name: Install Tailscale
+        shell: bash
         run: |
+          set -euo pipefail
+
           curl -fsSL https://tailscale.com/install.sh | sh
 
           sudo systemctl enable --now tailscaled
 
       - name: Connect to Tailscale
+        shell: bash
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          set -euo pipefail
+
+          if [ -z "${TS_AUTHKEY:-}" ]; then
+            echo "TAILSCALE_AUTH_KEY secret is missing"
+            exit 1
+          fi
+
           sudo tailscale up \
             --authkey="$TS_AUTHKEY" \
             --hostname="gh-ubuntu-${GITHUB_RUN_ID}"
@@ -63,7 +91,7 @@ jobs:
           TS_IP=""
 
           for i in $(seq 1 30); do
-            TS_IP=$(sudo tailscale ip -4 | head -n 1)
+            TS_IP=$(sudo tailscale ip -4 | head -n 1 || true)
 
             if [ -n "$TS_IP" ]; then
               break
@@ -79,39 +107,55 @@ jobs:
 
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-      - name: Verify RDP
+      - name: Configure and Verify XRDP
+        shell: bash
         run: |
-          sudo systemctl restart xrdp
+          set -euo pipefail
 
+          sudo systemctl restart xrdp
           sleep 5
 
-          sudo systemctl is-active --quiet xrdp || {
-            echo "XRDP service is not running"
+          if ! sudo systemctl is-active --quiet xrdp; then
+            echo "XRDP service failed"
+            sudo journalctl -u xrdp --no-pager -n 50
             exit 1
-          }
+          fi
 
-          if ! nc -z -w 5 "$TAILSCALE_IP" 3389; then
-            echo "RDP port 3389 is not accessible"
+          if ! nc -z -w 10 127.0.0.1 3389; then
+            echo "XRDP is not listening on port 3389"
             sudo ss -lntp
             exit 1
           fi
 
-          echo "RDP connection is ready!"
+          echo "XRDP service is ready!"
 
-      - name: Show Connection Details
+      - name: Show RDP Credentials
+        shell: bash
         run: |
-          echo "## Ubuntu RDP Access" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- OS: Ubuntu 24.04" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Desktop: XFCE" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Address: $TAILSCALE_IP" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Port: 3389" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Username: RDP" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Password: Set in GitHub Secrets (RDP_PASSWORD)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Ubuntu RDP Connection"
+            echo ""
+            echo "| Setting | Value |"
+            echo "|---|---|"
+            echo "| OS | Ubuntu 24.04 |"
+            echo "| Desktop | XFCE |"
+            echo "| IP Address | $TAILSCALE_IP |"
+            echo "| Port | 3389 |"
+            echo "| Username | RDP |"
+            echo "| Password | Hidden in logs for security |"
+            echo ""
+            echo "Password is available in the masked workflow environment."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "Ubuntu RDP is ready at $TAILSCALE_IP:3389"
+          echo "================================"
+          echo "Ubuntu RDP is ready!"
+          echo "IP: $TAILSCALE_IP"
+          echo "Username: RDP"
+          echo "Password: Generated securely (masked)"
+          echo "================================"
 
       - name: Keep Runner Alive
+        shell: bash
         run: |
           while true; do
             echo "[$(date)] Ubuntu RDP Active"
