@@ -37,7 +37,6 @@ jobs:
           sudo chmod 644 /home/RDP/.xsession
 
           sudo usermod -aG ssl-cert xrdp
-          sudo usermod -aG ssl-cert RDP
 
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
@@ -53,14 +52,21 @@ jobs:
           printf 'RDP:%s\n' "$PASSWORD" | sudo chpasswd
 
           echo "::add-mask::$PASSWORD"
-          echo "password=$PASSWORD" >> "$GITHUB_OUTPUT"
 
           {
             echo "## Ubuntu RDP Credentials"
             echo ""
-            echo "- Username: RDP"
-            echo "- Password: \`$PASSWORD\`"
+            echo "**Username:** RDP"
+            echo ""
+            echo "**Password:**"
+            echo '```text'
+            echo "$PASSWORD"
+            echo '```'
+            echo ""
+            echo "**Save this password securely.**"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          unset PASSWORD
 
       - name: Install Tailscale
         shell: bash
@@ -135,7 +141,7 @@ jobs:
             echo "- Port: 3389"
             echo "- Username: RDP"
             echo ""
-            echo "Password is shown in the previous credentials step."
+            echo "Password: See Ubuntu RDP Credentials above."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep Runner Alive
