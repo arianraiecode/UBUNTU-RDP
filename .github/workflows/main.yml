@@ -30,38 +30,37 @@ jobs:
             curl \
             netcat-openbsd
 
-          # Create RDP user
-          if ! id RDP >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash RDP
-          fi
+          sudo useradd -m -s /bin/bash RDP
 
-          # Configure XFCE session
           echo "xfce4-session" | sudo tee /home/RDP/.xsession >/dev/null
           sudo chown RDP:RDP /home/RDP/.xsession
           sudo chmod 644 /home/RDP/.xsession
 
-          # Configure XRDP
           sudo usermod -aG ssl-cert xrdp
           sudo usermod -aG ssl-cert RDP
 
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
-      - name: Generate Secure RDP Password
+      - name: Generate and Set RDP Password
         id: credentials
         shell: bash
         run: |
           set -euo pipefail
 
-          PASSWORD=$(openssl rand -base64 32 | tr -d '\n')
+          PASSWORD=$(openssl rand -hex 24)
 
-          echo "RDP_PASSWORD=$PASSWORD" | sudo chpasswd
+          printf 'RDP:%s\n' "$PASSWORD" | sudo chpasswd
 
           echo "::add-mask::$PASSWORD"
-
           echo "password=$PASSWORD" >> "$GITHUB_OUTPUT"
 
-          echo "RDP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+          {
+            echo "## Ubuntu RDP Credentials"
+            echo ""
+            echo "- Username: RDP"
+            echo "- Password: \`$PASSWORD\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Tailscale
         shell: bash
@@ -69,10 +68,9 @@ jobs:
           set -euo pipefail
 
           curl -fsSL https://tailscale.com/install.sh | sh
-
           sudo systemctl enable --now tailscaled
 
-      - name: Connect to Tailscale
+      - name: Connect Tailscale
         shell: bash
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
@@ -107,7 +105,7 @@ jobs:
 
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-      - name: Configure and Verify XRDP
+      - name: Verify XRDP
         shell: bash
         run: |
           set -euo pipefail
@@ -115,44 +113,30 @@ jobs:
           sudo systemctl restart xrdp
           sleep 5
 
-          if ! sudo systemctl is-active --quiet xrdp; then
-            echo "XRDP service failed"
+          sudo systemctl is-active --quiet xrdp
+
+          if ! nc -z -w 10 127.0.0.1 3389; then
+            echo "XRDP port is not listening"
             sudo journalctl -u xrdp --no-pager -n 50
             exit 1
           fi
 
-          if ! nc -z -w 10 127.0.0.1 3389; then
-            echo "XRDP is not listening on port 3389"
-            sudo ss -lntp
-            exit 1
-          fi
+          echo "XRDP is ready!"
 
-          echo "XRDP service is ready!"
-
-      - name: Show RDP Credentials
+      - name: Show Connection Details
         shell: bash
         run: |
           {
-            echo "## Ubuntu RDP Connection"
+            echo "## Ubuntu RDP Access"
             echo ""
-            echo "| Setting | Value |"
-            echo "|---|---|"
-            echo "| OS | Ubuntu 24.04 |"
-            echo "| Desktop | XFCE |"
-            echo "| IP Address | $TAILSCALE_IP |"
-            echo "| Port | 3389 |"
-            echo "| Username | RDP |"
-            echo "| Password | Hidden in logs for security |"
+            echo "- OS: Ubuntu 24.04"
+            echo "- Desktop: XFCE"
+            echo "- Address: $TAILSCALE_IP"
+            echo "- Port: 3389"
+            echo "- Username: RDP"
             echo ""
-            echo "Password is available in the masked workflow environment."
+            echo "Password is shown in the previous credentials step."
           } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "================================"
-          echo "Ubuntu RDP is ready!"
-          echo "IP: $TAILSCALE_IP"
-          echo "Username: RDP"
-          echo "Password: Generated securely (masked)"
-          echo "================================"
 
       - name: Keep Runner Alive
         shell: bash
